@@ -14,7 +14,7 @@ A power-user focused neural network library for Go. No hidden defaults, no magic
 ## Installation
 
 ```bash
-go get github.com/yourusername/flow
+go get github.com/Juicywoowowow/Flow
 ```
 
 ## Quick Start
