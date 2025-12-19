@@ -81,7 +81,9 @@ func (e *ELUActivation) forward(x *tensor, out *tensor) {
 		if v > 0 {
 			out.data[i] = v
 		} else {
-			out.data[i] = e.Alpha * (math.Exp(v) - 1)
+			// Clamp to prevent underflow (exp of very negative = 0)
+			clampedV := math.Max(v, -700) // exp(-700) is very small but safe
+			out.data[i] = e.Alpha * (math.Exp(clampedV) - 1)
 		}
 	}
 }
@@ -91,7 +93,8 @@ func (e *ELUActivation) backward(x *tensor, gradOut *tensor, gradIn *tensor) {
 		if v > 0 {
 			gradIn.data[i] = gradOut.data[i]
 		} else {
-			gradIn.data[i] = gradOut.data[i] * e.Alpha * math.Exp(v)
+			clampedV := math.Max(v, -700)
+			gradIn.data[i] = gradOut.data[i] * e.Alpha * math.Exp(clampedV)
 		}
 	}
 }
@@ -105,7 +108,14 @@ func Sigmoid() Activation { return &SigmoidActivation{} }
 
 func (s *SigmoidActivation) forward(x *tensor, out *tensor) {
 	for i, v := range x.data {
-		out.data[i] = 1.0 / (1.0 + math.Exp(-v))
+		// Clamp input to prevent overflow: exp(-v) overflows for v < -709
+		if v >= 0 {
+			out.data[i] = 1.0 / (1.0 + math.Exp(-v))
+		} else {
+			// Use numerically stable form for negative values
+			expV := math.Exp(v)
+			out.data[i] = expV / (1.0 + expV)
+		}
 	}
 }
 

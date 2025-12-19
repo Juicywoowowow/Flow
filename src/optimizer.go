@@ -99,11 +99,24 @@ type AdamConfig struct {
 }
 
 func Adam(config AdamConfig) Optimizer {
+	// Set safe defaults
+	epsilon := config.Epsilon
+	if epsilon == 0 {
+		epsilon = 1e-8
+	}
+	beta1 := config.Beta1
+	if beta1 == 0 {
+		beta1 = 0.9
+	}
+	beta2 := config.Beta2
+	if beta2 == 0 {
+		beta2 = 0.999
+	}
 	return &AdamOptimizer{
 		LR:          config.LR,
-		Beta1:       config.Beta1,
-		Beta2:       config.Beta2,
-		Epsilon:     config.Epsilon,
+		Beta1:       beta1,
+		Beta2:       beta2,
+		Epsilon:     epsilon,
 		WeightDecay: config.WeightDecay,
 		AMSGrad:     config.AMSGrad,
 	}
@@ -186,11 +199,24 @@ type AdamWConfig struct {
 }
 
 func AdamW(config AdamWConfig) Optimizer {
+	// Set safe defaults
+	epsilon := config.Epsilon
+	if epsilon == 0 {
+		epsilon = 1e-8
+	}
+	beta1 := config.Beta1
+	if beta1 == 0 {
+		beta1 = 0.9
+	}
+	beta2 := config.Beta2
+	if beta2 == 0 {
+		beta2 = 0.999
+	}
 	return &AdamWOptimizer{
 		LR:          config.LR,
-		Beta1:       config.Beta1,
-		Beta2:       config.Beta2,
-		Epsilon:     config.Epsilon,
+		Beta1:       beta1,
+		Beta2:       beta2,
+		Epsilon:     epsilon,
 		WeightDecay: config.WeightDecay,
 	}
 }
@@ -261,10 +287,19 @@ type RMSpropConfig struct {
 }
 
 func RMSprop(config RMSpropConfig) Optimizer {
+	// Set safe defaults
+	epsilon := config.Epsilon
+	if epsilon == 0 {
+		epsilon = 1e-8
+	}
+	alpha := config.Alpha
+	if alpha == 0 {
+		alpha = 0.99
+	}
 	return &RMSpropOptimizer{
 		LR:          config.LR,
-		Alpha:       config.Alpha,
-		Epsilon:     config.Epsilon,
+		Alpha:       alpha,
+		Epsilon:     epsilon,
 		WeightDecay: config.WeightDecay,
 		Momentum:    config.Momentum,
 		Centered:    config.Centered,
@@ -309,6 +344,10 @@ func (r *RMSpropOptimizer) step(params []*tensor, grads []*tensor) {
 			if r.Centered {
 				r.g[i].data[j] = r.Alpha*r.g[i].data[j] + (1-r.Alpha)*g
 				avg = v.data[j] - r.g[i].data[j]*r.g[i].data[j]
+				// Ensure avg is never negative (can happen due to numerical precision)
+				if avg < 0 {
+					avg = r.Epsilon
+				}
 			} else {
 				avg = v.data[j]
 			}
@@ -344,11 +383,16 @@ type AdagradConfig struct {
 }
 
 func Adagrad(config AdagradConfig) Optimizer {
+	// Set safe defaults
+	epsilon := config.Epsilon
+	if epsilon == 0 {
+		epsilon = 1e-10
+	}
 	return &AdagradOptimizer{
 		LR:          config.LR,
 		LRDecay:     config.LRDecay,
 		WeightDecay: config.WeightDecay,
-		Epsilon:     config.Epsilon,
+		Epsilon:     epsilon,
 	}
 }
 

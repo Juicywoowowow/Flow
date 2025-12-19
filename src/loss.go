@@ -218,7 +218,7 @@ func (b *BinaryCrossEntropyLoss) compute(pred, target *tensor) float64 {
 }
 
 func (b *BinaryCrossEntropyLoss) gradient(pred, target *tensor, gradOut *tensor) {
-	eps := 1e-15
+	eps := 1e-7 // Larger epsilon for gradient stability
 	scale := 1.0
 	if b.Reduction == "mean" {
 		scale = 1.0 / float64(len(pred.data))
@@ -226,7 +226,10 @@ func (b *BinaryCrossEntropyLoss) gradient(pred, target *tensor, gradOut *tensor)
 	for i := range pred.data {
 		p := math.Max(math.Min(pred.data[i], 1-eps), eps)
 		t := target.data[i]
-		gradOut.data[i] = scale * (p - t) / (p * (1 - p))
+		// Numerically stable gradient: (p - t) / (p * (1 - p))
+		// Clamp denominator to avoid division by near-zero
+		denom := math.Max(p*(1-p), eps)
+		gradOut.data[i] = scale * (p - t) / denom
 	}
 }
 
@@ -262,7 +265,7 @@ func (k *KLDivergenceLoss) compute(pred, target *tensor) float64 {
 }
 
 func (k *KLDivergenceLoss) gradient(pred, target *tensor, gradOut *tensor) {
-	eps := 1e-15
+	eps := 1e-7 // Larger epsilon for gradient stability
 	scale := 1.0
 	if k.Reduction == "mean" {
 		scale = 1.0 / float64(len(pred.data))

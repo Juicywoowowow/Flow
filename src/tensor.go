@@ -17,7 +17,13 @@ type tensor struct {
 func newTensor(shape ...int) *tensor {
 	size := 1
 	for _, s := range shape {
+		if s <= 0 {
+			s = 1 // Ensure non-zero size
+		}
 		size *= s
+	}
+	if size <= 0 {
+		size = 1 // Minimum size of 1
 	}
 	stride := make([]int, len(shape))
 	for i := len(shape) - 1; i >= 0; i-- {
@@ -194,6 +200,9 @@ func clip(a *tensor, min, max float64) {
 }
 
 func maxVal(a *tensor) float64 {
+	if len(a.data) == 0 {
+		return 0 // Safe default for empty tensor
+	}
 	m := a.data[0]
 	for _, v := range a.data[1:] {
 		if v > m {
