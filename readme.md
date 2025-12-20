@@ -84,6 +84,57 @@ func main() {
 }
 ```
 
+## Layer Freezing & Fine-Tuning
+
+Flow supports layer freezing for transfer learning workflows. Freeze layers to preserve learned features while training only specific layers.
+
+```go
+// Load pretrained model
+net.Load("pretrained_model.json")
+
+// Freeze early layers (layers 0-2)
+net.FreezeTo(3)
+
+// Or freeze specific layers by index
+net.Freeze(0, 1, 2)
+
+// Freeze all layers except the last two
+net.FreezeExcept(len(layers)-2, len(layers)-1)
+
+// Unfreeze for fine-tuning with low learning rate
+net.UnfreezeAll()
+
+// Check freeze status
+fmt.Println(net.FreezeSummary())
+// Layer 0: conv2d          1152 params [FROZEN]
+// Layer 1: max_pool2d         0 params [FROZEN]
+// Layer 2: dense            8256 params [trainable]
+// ...
+// Trainable params: 8256
+// Frozen params:    1152
+
+// Get parameter counts
+trainable := net.TrainableParameters()
+total := net.TotalParameters()
+```
+
+### Freezing Methods
+
+| Method | Description |
+|--------|-------------|
+| `Freeze(indices...)` | Freeze specific layer indices |
+| `Unfreeze(indices...)` | Unfreeze specific layer indices |
+| `FreezeTo(n)` | Freeze layers 0 to n-1 |
+| `FreezeFrom(n)` | Freeze layers n to end |
+| `FreezeAll()` | Freeze all layers |
+| `UnfreezeAll()` | Unfreeze all layers |
+| `FreezeExcept(indices...)` | Freeze all except specified |
+| `FreezeByName(name)` | Freeze all layers with given name |
+| `IsFrozen(index)` | Check if layer is frozen |
+| `FreezeSummary()` | Human-readable freeze status |
+| `TrainableParameters()` | Count of trainable params |
+| `TotalParameters()` | Count of all params |
+
 ## API Reference
 
 ### Layers
@@ -92,6 +143,7 @@ func main() {
 |-------|---------|-------------|
 | `Dense(units)` | `.WithActivation()`, `.WithInitializer()`, `.WithBiasInitializer()`, `.WithBias()` | Fully connected |
 | `Conv2D(filters, kernelSize)` | `.WithStride()`, `.WithPadding()`, `.WithActivation()`, `.WithInitializer()`, `.WithBias()` | 2D Convolution |
+| `DepthwiseConv2D(kernelSize)` | `.WithStride()`, `.WithPadding()`, `.WithDepthMultiplier()`, `.WithActivation()`, `.WithInitializer()`, `.WithBias()` | Depthwise separable convolution (MobileNet-style) |
 | `MaxPool2D(poolSize)` | `.WithStride()`, `.WithPadding()` | Max pooling |
 | `AvgPool2D(poolSize)` | `.WithStride()`, `.WithPadding()` | Average pooling |
 | `Embedding(vocabSize, embedDim)` | `.WithInitializer()`, `.WithPaddingIdx()` | Token → Vector lookup |
@@ -103,11 +155,13 @@ func main() {
 | `MultiHeadAttention(numHeads, keyDim)` | `.WithValueDim()`, `.WithDropout()`, `.WithBias()`, `.WithInitializer()`, `.WithBiasInitializer()` | Multi-Head Self-Attention |
 | `SelfAttention(embedDim)` | `.WithBias()`, `.WithInitializer()`, `.WithBiasInitializer()` | Single-Head Self-Attention |
 | `Dropout(rate)` | `.WithSeed()` | Random dropout |
+| `SpatialDropout2D(rate)` | `.WithSeed()` | Drops entire feature maps (channels) |
 | `Flatten()` | - | Flatten to 1D |
 | `BatchNorm(epsilon, momentum)` | - | Batch normalization |
 | `LayerNorm(epsilon)` | - | Layer normalization (for Transformers) |
 | `RMSNorm(epsilon)` | - | RMS normalization (LLaMA-style) |
 | `GroupNorm(numGroups, epsilon)` | - | Group normalization |
+
 
 ### Activations
 

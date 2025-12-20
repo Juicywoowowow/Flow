@@ -269,6 +269,307 @@ func (c *Conv2DLayer) outputShape() []int {
 
 func (c *Conv2DLayer) name() string { return "conv2d" }
 
+// =============================================================================
+// DepthwiseConv2D - Depthwise Separable Convolution (Spatial Part)
+// Applies a single filter per input channel (vs. standard conv which applies
+// each filter to ALL input channels). Used in MobileNet, EfficientNet, etc.
+// Computational cost: O(K²·C·H·W) vs O(K²·C_in·C_out·H·W) for standard conv
+// =============================================================================
+
+// DepthwiseConv2DLayer applies separate convolutions to each input channel
+type DepthwiseConv2DLayer struct {
+	kernelSize      [2]int
+	stride          [2]int
+	padding         string // "valid" or "same"
+	depthMultiplier int    // Number of output channels per input channel
+	activation      Activation
+	initializer     Initializer
+	biasInit        Initializer
+	useBias         bool
+	weights         *tensor // [kernelH, kernelW, inChannels, depthMultiplier]
+	bias            *tensor // [inChannels * depthMultiplier]
+	input           *tensor
+	preAct          *tensor
+	gradW           *tensor
+	gradB           *tensor
+	inputShape      []int // [H, W, C]
+	built           bool
+}
+
+type DepthwiseConv2DBuilder struct {
+	layer *DepthwiseConv2DLayer
+}
+
+// DepthwiseConv2D creates a depthwise convolution layer
+// Each input channel is convolved with its own set of filters
+// Output channels = input channels * depthMultiplier
+func DepthwiseConv2D(kernelSize [2]int) *DepthwiseConv2DBuilder {
+	return &DepthwiseConv2DBuilder{
+		layer: &DepthwiseConv2DLayer{
+			kernelSize:      kernelSize,
+			stride:          [2]int{1, 1},
+			padding:         "valid",
+			depthMultiplier: 1,
+		},
+	}
+}
+
+func (b *DepthwiseConv2DBuilder) WithStride(strideH, strideW int) *DepthwiseConv2DBuilder {
+	b.layer.stride = [2]int{strideH, strideW}
+	return b
+}
+
+func (b *DepthwiseConv2DBuilder) WithPadding(padding string) *DepthwiseConv2DBuilder {
+	b.layer.padding = padding
+	return b
+}
+
+// WithDepthMultiplier sets the number of output channels per input channel
+// Default is 1. If set to 2, each input channel produces 2 output channels.
+func (b *DepthwiseConv2DBuilder) WithDepthMultiplier(mult int) *DepthwiseConv2DBuilder {
+	b.layer.depthMultiplier = mult
+	return b
+}
+
+func (b *DepthwiseConv2DBuilder) WithActivation(act Activation) *DepthwiseConv2DBuilder {
+	b.layer.activation = act
+	return b
+}
+
+func (b *DepthwiseConv2DBuilder) WithInitializer(init Initializer) *DepthwiseConv2DBuilder {
+	b.layer.initializer = init
+	return b
+}
+
+func (b *DepthwiseConv2DBuilder) WithBiasInitializer(init Initializer) *DepthwiseConv2DBuilder {
+	b.layer.biasInit = init
+	return b
+}
+
+func (b *DepthwiseConv2DBuilder) WithBias(useBias bool) *DepthwiseConv2DBuilder {
+	b.layer.useBias = useBias
+	return b
+}
+
+func (b *DepthwiseConv2DBuilder) Build() Layer {
+	return b.layer
+}
+
+func (d *DepthwiseConv2DLayer) build(inputShape []int, rng *rand.Rand) error {
+	if len(inputShape) != 3 {
+		return errors.New("flow: DepthwiseConv2D requires input shape [H, W, C]")
+	}
+	if d.initializer == nil {
+		return errors.New("flow: DepthwiseConv2D requires initializer")
+	}
+	if d.activation == nil {
+		return errors.New("flow: DepthwiseConv2D requires activation")
+	}
+	if d.useBias && d.biasInit == nil {
+		return errors.New("flow: DepthwiseConv2D with bias requires bias initializer")
+	}
+	if d.depthMultiplier < 1 {
+		return errors.New("flow: DepthwiseConv2D depthMultiplier must be >= 1")
+	}
+
+	d.inputShape = inputShape
+	inChannels := inputShape[2]
+	outChannels := inChannels * d.depthMultiplier
+
+	// Weights shape: [kernelH, kernelW, inChannels, depthMultiplier]
+	// Each input channel has depthMultiplier separate K×K filters
+	d.weights = newTensor(d.kernelSize[0], d.kernelSize[1], inChannels, d.depthMultiplier)
+	fanIn := d.kernelSize[0] * d.kernelSize[1]
+	fanOut := d.kernelSize[0] * d.kernelSize[1] * d.depthMultiplier
+	d.initializer.initialize(d.weights, fanIn, fanOut, rng)
+
+	d.gradW = newTensor(d.kernelSize[0], d.kernelSize[1], inChannels, d.depthMultiplier)
+
+	if d.useBias {
+		d.bias = newTensor(outChannels)
+		d.biasInit.initialize(d.bias, fanIn, fanOut, rng)
+		d.gradB = newTensor(outChannels)
+	}
+
+	d.built = true
+	return nil
+}
+
+func (d *DepthwiseConv2DLayer) computeOutputSize(inputH, inputW int) (int, int) {
+	var outH, outW int
+	if d.padding == "same" {
+		outH = (inputH + d.stride[0] - 1) / d.stride[0]
+		outW = (inputW + d.stride[1] - 1) / d.stride[1]
+	} else { // valid
+		outH = (inputH-d.kernelSize[0])/d.stride[0] + 1
+		outW = (inputW-d.kernelSize[1])/d.stride[1] + 1
+	}
+	return outH, outW
+}
+
+func (d *DepthwiseConv2DLayer) forward(input *tensor, training bool) (*tensor, error) {
+	if !d.built {
+		return nil, errors.New("flow: DepthwiseConv2D not built")
+	}
+
+	batchSize := input.shape[0]
+	inputH := input.shape[1]
+	inputW := input.shape[2]
+	inChannels := input.shape[3]
+
+	outH, outW := d.computeOutputSize(inputH, inputW)
+	outChannels := inChannels * d.depthMultiplier
+
+	d.input = input
+	d.preAct = newTensor(batchSize, outH, outW, outChannels)
+
+	// Compute padding
+	var padTop, padLeft int
+	if d.padding == "same" {
+		padH := maxInt((outH-1)*d.stride[0]+d.kernelSize[0]-inputH, 0)
+		padW := maxInt((outW-1)*d.stride[1]+d.kernelSize[1]-inputW, 0)
+		padTop = padH / 2
+		padLeft = padW / 2
+	}
+
+	// Depthwise convolution: each input channel convolves with its own filter(s)
+	for b := 0; b < batchSize; b++ {
+		for oh := 0; oh < outH; oh++ {
+			for ow := 0; ow < outW; ow++ {
+				for ic := 0; ic < inChannels; ic++ {
+					for dm := 0; dm < d.depthMultiplier; dm++ {
+						sum := 0.0
+
+						for kh := 0; kh < d.kernelSize[0]; kh++ {
+							for kw := 0; kw < d.kernelSize[1]; kw++ {
+								ih := oh*d.stride[0] + kh - padTop
+								iw := ow*d.stride[1] + kw - padLeft
+
+								if ih >= 0 && ih < inputH && iw >= 0 && iw < inputW {
+									inputIdx := b*inputH*inputW*inChannels + ih*inputW*inChannels + iw*inChannels + ic
+									// Weight index: [kh, kw, ic, dm]
+									weightIdx := kh*d.kernelSize[1]*inChannels*d.depthMultiplier +
+										kw*inChannels*d.depthMultiplier +
+										ic*d.depthMultiplier + dm
+									sum += input.data[inputIdx] * d.weights.data[weightIdx]
+								}
+							}
+						}
+
+						// Output channel = ic * depthMultiplier + dm
+						oc := ic*d.depthMultiplier + dm
+						outIdx := b*outH*outW*outChannels + oh*outW*outChannels + ow*outChannels + oc
+						d.preAct.data[outIdx] = sum
+
+						if d.useBias {
+							d.preAct.data[outIdx] += d.bias.data[oc]
+						}
+					}
+				}
+			}
+		}
+	}
+
+	output := newTensor(d.preAct.shape...)
+	d.activation.forward(d.preAct, output)
+	return output, nil
+}
+
+func (d *DepthwiseConv2DLayer) backward(gradOutput *tensor) (*tensor, error) {
+	batchSize := d.input.shape[0]
+	inputH := d.input.shape[1]
+	inputW := d.input.shape[2]
+	inChannels := d.input.shape[3]
+	outH := gradOutput.shape[1]
+	outW := gradOutput.shape[2]
+	outChannels := inChannels * d.depthMultiplier
+
+	// Gradient through activation
+	gradPreAct := newTensor(gradOutput.shape...)
+	d.activation.backward(d.preAct, gradOutput, gradPreAct)
+
+	// Compute padding
+	var padTop, padLeft int
+	if d.padding == "same" {
+		padH := maxInt((outH-1)*d.stride[0]+d.kernelSize[0]-inputH, 0)
+		padW := maxInt((outW-1)*d.stride[1]+d.kernelSize[1]-inputW, 0)
+		padTop = padH / 2
+		padLeft = padW / 2
+	}
+
+	d.gradW.zeroGrad()
+	if d.useBias {
+		d.gradB.zeroGrad()
+	}
+	gradInput := newTensor(d.input.shape...)
+
+	for b := 0; b < batchSize; b++ {
+		for oh := 0; oh < outH; oh++ {
+			for ow := 0; ow < outW; ow++ {
+				for ic := 0; ic < inChannels; ic++ {
+					for dm := 0; dm < d.depthMultiplier; dm++ {
+						oc := ic*d.depthMultiplier + dm
+						outIdx := b*outH*outW*outChannels + oh*outW*outChannels + ow*outChannels + oc
+						dout := gradPreAct.data[outIdx]
+
+						if d.useBias {
+							d.gradB.data[oc] += dout
+						}
+
+						for kh := 0; kh < d.kernelSize[0]; kh++ {
+							for kw := 0; kw < d.kernelSize[1]; kw++ {
+								ih := oh*d.stride[0] + kh - padTop
+								iw := ow*d.stride[1] + kw - padLeft
+
+								if ih >= 0 && ih < inputH && iw >= 0 && iw < inputW {
+									inputIdx := b*inputH*inputW*inChannels + ih*inputW*inChannels + iw*inChannels + ic
+									weightIdx := kh*d.kernelSize[1]*inChannels*d.depthMultiplier +
+										kw*inChannels*d.depthMultiplier +
+										ic*d.depthMultiplier + dm
+
+									d.gradW.data[weightIdx] += d.input.data[inputIdx] * dout
+									gradInput.data[inputIdx] += d.weights.data[weightIdx] * dout
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Average gradients
+	scale := 1.0 / float64(batchSize)
+	mulScalar(d.gradW, scale)
+	if d.useBias {
+		mulScalar(d.gradB, scale)
+	}
+
+	return gradInput, nil
+}
+
+func (d *DepthwiseConv2DLayer) parameters() []*tensor {
+	if d.useBias {
+		return []*tensor{d.weights, d.bias}
+	}
+	return []*tensor{d.weights}
+}
+
+func (d *DepthwiseConv2DLayer) gradients() []*tensor {
+	if d.useBias {
+		return []*tensor{d.gradW, d.gradB}
+	}
+	return []*tensor{d.gradW}
+}
+
+func (d *DepthwiseConv2DLayer) outputShape() []int {
+	outH, outW := d.computeOutputSize(d.inputShape[0], d.inputShape[1])
+	outChannels := d.inputShape[2] * d.depthMultiplier
+	return []int{outH, outW, outChannels}
+}
+
+func (d *DepthwiseConv2DLayer) name() string { return "depthwise_conv2d" }
+
 // MaxPool2DLayer - Max pooling layer
 type MaxPool2DLayer struct {
 	poolSize   [2]int

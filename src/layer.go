@@ -254,6 +254,140 @@ func (d *DropoutLayer) gradients() []*tensor  { return nil }
 func (d *DropoutLayer) outputShape() []int    { return nil }
 func (d *DropoutLayer) name() string          { return "dropout" }
 
+// =============================================================================
+// SpatialDropout2D - Drops entire feature maps (channels) during training
+// More effective for CNNs where adjacent pixels are highly correlated
+// Reference: "Efficient Object Localization Using Convolutional Networks"
+// (Tompson et al., 2015)
+// =============================================================================
+
+// SpatialDropout2DLayer drops entire 2D feature maps (channels) during training
+// Unlike regular dropout which drops individual pixels, spatial dropout
+// drops entire channels, promoting independence among feature maps.
+type SpatialDropout2DLayer struct {
+	rate       float64
+	seed       int64
+	mask       *tensor // Channel mask [batch, 1, 1, channels]
+	rng        *rand.Rand
+	inputShape []int
+	built      bool
+}
+
+type SpatialDropout2DBuilder struct {
+	layer *SpatialDropout2DLayer
+}
+
+// SpatialDropout2D creates a spatial dropout layer for CNN feature maps
+// rate: fraction of channels to drop (0.0 to 1.0)
+// Input shape: [batch, height, width, channels]
+// Drops entire channels (all pixels in a channel) rather than individual pixels
+func SpatialDropout2D(rate float64) *SpatialDropout2DBuilder {
+	return &SpatialDropout2DBuilder{
+		layer: &SpatialDropout2DLayer{
+			rate: rate,
+		},
+	}
+}
+
+func (b *SpatialDropout2DBuilder) WithSeed(seed int64) *SpatialDropout2DBuilder {
+	b.layer.seed = seed
+	return b
+}
+
+func (b *SpatialDropout2DBuilder) Build() Layer {
+	return b.layer
+}
+
+func (s *SpatialDropout2DLayer) build(inputShape []int, rng *rand.Rand) error {
+	if s.rate < 0 || s.rate >= 1 {
+		return errors.New("flow: SpatialDropout2D rate must be in [0, 1)")
+	}
+	if len(inputShape) != 3 {
+		return errors.New("flow: SpatialDropout2D requires input shape [H, W, C]")
+	}
+	s.inputShape = inputShape
+	s.rng = rng
+	s.built = true
+	return nil
+}
+
+func (s *SpatialDropout2DLayer) forward(input *tensor, training bool) (*tensor, error) {
+	if !training {
+		// During inference, pass through unchanged (inverted dropout)
+		return input.clone(), nil
+	}
+
+	// Input shape: [batch, H, W, channels]
+	batchSize := input.shape[0]
+	height := input.shape[1]
+	width := input.shape[2]
+	channels := input.shape[3]
+
+	output := newTensor(input.shape...)
+
+	// Create channel mask of shape [batch, 1, 1, channels]
+	// Same mask is broadcast across all spatial positions
+	s.mask = newTensor(batchSize, 1, 1, channels)
+
+	scale := 1.0 / (1.0 - s.rate)
+
+	// Generate mask: one decision per channel per sample
+	for b := 0; b < batchSize; b++ {
+		for c := 0; c < channels; c++ {
+			maskIdx := b*channels + c
+			if s.rng.Float64() >= s.rate {
+				s.mask.data[maskIdx] = scale
+			} else {
+				s.mask.data[maskIdx] = 0
+			}
+		}
+	}
+
+	// Apply mask with broadcasting across spatial dimensions
+	for b := 0; b < batchSize; b++ {
+		for h := 0; h < height; h++ {
+			for w := 0; w < width; w++ {
+				for c := 0; c < channels; c++ {
+					inputIdx := b*height*width*channels + h*width*channels + w*channels + c
+					maskIdx := b*channels + c
+					output.data[inputIdx] = input.data[inputIdx] * s.mask.data[maskIdx]
+				}
+			}
+		}
+	}
+
+	return output, nil
+}
+
+func (s *SpatialDropout2DLayer) backward(gradOutput *tensor) (*tensor, error) {
+	batchSize := gradOutput.shape[0]
+	height := gradOutput.shape[1]
+	width := gradOutput.shape[2]
+	channels := gradOutput.shape[3]
+
+	gradInput := newTensor(gradOutput.shape...)
+
+	// Apply same mask that was used in forward pass (with broadcasting)
+	for b := 0; b < batchSize; b++ {
+		for h := 0; h < height; h++ {
+			for w := 0; w < width; w++ {
+				for c := 0; c < channels; c++ {
+					gradIdx := b*height*width*channels + h*width*channels + w*channels + c
+					maskIdx := b*channels + c
+					gradInput.data[gradIdx] = gradOutput.data[gradIdx] * s.mask.data[maskIdx]
+				}
+			}
+		}
+	}
+
+	return gradInput, nil
+}
+
+func (s *SpatialDropout2DLayer) parameters() []*tensor { return nil }
+func (s *SpatialDropout2DLayer) gradients() []*tensor  { return nil }
+func (s *SpatialDropout2DLayer) outputShape() []int    { return s.inputShape }
+func (s *SpatialDropout2DLayer) name() string          { return "spatial_dropout2d" }
+
 // FlattenLayer - flattens input to 1D (per sample)
 type FlattenLayer struct {
 	inputShape []int

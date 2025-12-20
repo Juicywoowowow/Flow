@@ -20,6 +20,7 @@ type Network struct {
 	built       bool
 	rng         *rand.Rand
 	inputShape  []int
+	frozenState *frozenState // For layer freezing support
 }
 
 // NetworkBuilder for fluent API
@@ -174,7 +175,7 @@ func (n *Network) Train(inputs [][]float64, targets [][]float64, config TrainCon
 	trainSize := trainX.shape[0]
 	numBatches := (trainSize + config.BatchSize - 1) / config.BatchSize
 
-	// Get all parameters
+	// Get all parameters (optimizer needs consistent param count for internal state)
 	var params []*tensor
 	var grads []*tensor
 	for _, layer := range n.layers {
@@ -218,10 +219,12 @@ func (n *Network) Train(inputs [][]float64, targets [][]float64, config TrainCon
 			// Compute loss
 			batchLoss := n.loss.compute(output, batchY)
 
-			// Add regularization loss
-			for _, layer := range n.layers {
-				for _, p := range layer.parameters() {
-					batchLoss += n.regularizer.loss(p)
+			// Add regularization loss (only for trainable layers)
+			for i, layer := range n.layers {
+				if !n.IsFrozen(i) {
+					for _, p := range layer.parameters() {
+						batchLoss += n.regularizer.loss(p)
+					}
 				}
 			}
 
@@ -243,13 +246,15 @@ func (n *Network) Train(inputs [][]float64, targets [][]float64, config TrainCon
 				}
 			}
 
-			// Apply regularization gradient
-			for _, layer := range n.layers {
-				layerGrads := layer.gradients()
-				layerParams := layer.parameters()
-				for j := range layerParams {
-					if layerGrads[j] != nil {
-						n.regularizer.gradient(layerParams[j], layerGrads[j])
+			// Apply regularization gradient (only for trainable layers)
+			for i, layer := range n.layers {
+				if !n.IsFrozen(i) {
+					layerGrads := layer.gradients()
+					layerParams := layer.parameters()
+					for j := range layerParams {
+						if layerGrads[j] != nil {
+							n.regularizer.gradient(layerParams[j], layerGrads[j])
+						}
 					}
 				}
 			}
@@ -279,6 +284,9 @@ func (n *Network) Train(inputs [][]float64, targets [][]float64, config TrainCon
 					}
 				}
 			}
+
+			// Zero out gradients for frozen layers (prevents parameter updates)
+			n.zeroFrozenGradients()
 
 			// Optimizer step
 			n.optimizer.step(params, grads)
